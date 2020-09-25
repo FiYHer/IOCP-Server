@@ -588,7 +588,7 @@ void iocp::handle_io(DWORD key, piocp_io point, DWORD number, int error)
 						{
 							bool state = post_recv(new_client, temp);
 							if (state == false) close_connected(new_client);
-							else std::cout << "[+] 向 " << temp->sock << " 投递Recv请求" << std::endl;
+							else std::cout << "[+] 向 " << new_client->sock << " 投递Recv请求" << std::endl;
 						}
 					}
 				}
@@ -651,7 +651,7 @@ void iocp::handle_io(DWORD key, piocp_io point, DWORD number, int error)
 			{
 				bool state = post_recv(client, value);
 				if (state == false) close_connected(client);
-				else std::cout << "向 " << value->sock << " 投递Recv请求" << std::endl;
+				else std::cout << "向 " << client->sock << " 投递Recv请求" << std::endl;
 			}
 		}
 	}
