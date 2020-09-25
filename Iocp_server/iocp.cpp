@@ -560,36 +560,42 @@ void iocp::handle_io(DWORD key, piocp_io point, DWORD number, int error)
 			if (new_client)
 			{
 				//加入客户列表
-				add_connect(new_client);
-
-				//获取客户地址
-				int local_len = 0, remote_len = 0;
-				LPSOCKADDR local_addr{ 0 }, remote_addr{ 0 };
-				m_getacceptexsockaddrs(point->buffer, point->buffer_size - ((sizeof(sockaddr_in) + 16) * 2),
-					sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16,
-					(SOCKADDR **)&local_addr, &local_len, (SOCKADDR **)&remote_addr, &remote_len);
-
-				//保存地址
-				memcpy(&new_client->local_addr, local_addr, local_len);
-				memcpy(&new_client->remote_addr, remote_addr, remote_len);
-
-				//关联到完成端口
-				HANDLE res = CreateIoCompletionPort((HANDLE)new_client->sock, m_completion, (DWORD)new_client, 0);
-				iocp::error(res, "handle_io CreateIoCompletionPort失败");
-
-				//通知用户
-				on_connect_finish_evnet(new_client, point);
-
-				//向新客户投递3个Read请求
-				for (int i = 0; i < 3; i++)
+				if (add_connect(new_client))
 				{
-					piocp_io temp = alloc_io(500);
-					if (temp)
+					//获取客户地址
+					int local_len = 0, remote_len = 0;
+					LPSOCKADDR local_addr{ 0 }, remote_addr{ 0 };
+					m_getacceptexsockaddrs(point->buffer, point->buffer_size - ((sizeof(sockaddr_in) + 16) * 2),
+						sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16,
+						(SOCKADDR **)&local_addr, &local_len, (SOCKADDR **)&remote_addr, &remote_len);
+
+					//保存地址
+					memcpy(&new_client->local_addr, local_addr, local_len);
+					memcpy(&new_client->remote_addr, remote_addr, remote_len);
+
+					//关联到完成端口
+					HANDLE res = CreateIoCompletionPort((HANDLE)new_client->sock, m_completion, (DWORD)new_client, 0);
+					iocp::error(res, "handle_io CreateIoCompletionPort失败");
+
+					//通知用户
+					on_connect_finish_evnet(new_client, point);
+
+					//向新客户投递3个Read请求
+					for (int i = 0; i < 3; i++)
 					{
-						bool state = post_recv(new_client, temp);
-						if (state == false) close_connected(new_client);
-						else std::cout << "[+] 向 " << temp->sock << " 投递Recv请求" << std::endl;
+						piocp_io temp = alloc_io(500);
+						if (temp)
+						{
+							bool state = post_recv(new_client, temp);
+							if (state == false) close_connected(new_client);
+							else std::cout << "[+] 向 " << temp->sock << " 投递Recv请求" << std::endl;
+						}
 					}
+				}
+				else
+				{
+					close_connected(new_client);
+					release_client(new_client);
 				}
 			}
 		}
@@ -897,23 +903,28 @@ void iocp::close_connected(piocp_client client)
 	LeaveCriticalSection(&client->criti_lock);
 }
 
-void iocp::add_connect(piocp_client client)
+bool iocp::add_connect(piocp_client client)
 {
-	if (client == nullptr) return;
-	if (client->sock == INVALID_SOCKET) return;
-	if (client->has_close) return;
+	if (client == nullptr) return false;
+	if (client->sock == INVALID_SOCKET) return false;
+	if (client->has_close) return false;
 
+	bool state = true;
 	EnterCriticalSection(&m_criti_connect);
 	if (m_connect_client_list.size() < m_max_connections)
-	{
 		m_connect_client_list.push_back(client);
-	}
+	else
+		state = false;
 	LeaveCriticalSection(&m_criti_connect);
+
+	return state;
 }
 
 piocp_io iocp::get_ture_io_info(piocp_client client, piocp_io io)
 {
 	if (client == nullptr) return nullptr;
+
+	EnterCriticalSection(&client->criti_lock);
 
 	if (io)
 	{
@@ -935,6 +946,9 @@ piocp_io iocp::get_ture_io_info(piocp_client client, piocp_io io)
 			break;
 		}
 	}
+
+	LeaveCriticalSection(&client->criti_lock);
+
 	return result;
 }
 

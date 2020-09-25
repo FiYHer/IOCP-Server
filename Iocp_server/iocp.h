@@ -219,7 +219,7 @@ public:
 	void close_connected(piocp_client client);
 
 	/* 添加一个新的客户进入列表 */
-	void add_connect(piocp_client client);
+	bool add_connect(piocp_client client);
 
 	/* 获取正确的I/O结构 */
 	piocp_io get_ture_io_info(piocp_client client, piocp_io io);
