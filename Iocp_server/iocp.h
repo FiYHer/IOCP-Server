@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <assert.h>
 
+#include <iostream>
 #include <vector>
 #include <list>
 
@@ -95,7 +96,6 @@ public:
 	int m_port;//服务器监听端口
 	SOCKET m_sock;//服务器套接字
 
-	int m_accept_num;//初始化的时候投递的Accept I/O数量
 	int m_max_accept_num;//最多投递的Accept I/O数量
 
 	int m_max_connections;//最大客户连接数
@@ -131,7 +131,18 @@ private:
 	static void __cdecl  listen_thread(void* data);
 
 	/* 工作线程 */
-	static void __cdecl work_thread(void* data);
+	static DWORD WINAPI work_thread(LPVOID data);
+
+	/* 错误检测 */
+	static void error(bool state, const char* text)
+	{
+		if (state == false)
+		{
+			std::cout << "[-] " << text << std::endl;
+			MessageBoxA(0, text, "错误", MB_OK | MB_ICONERROR);
+			exit(-1);
+		}
+	}
 
 public:
 	iocp();

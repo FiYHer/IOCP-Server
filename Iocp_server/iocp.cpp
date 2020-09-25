@@ -7,76 +7,54 @@ void __cdecl iocp::listen_thread(void* data)
 {
 	//强行转化
 	iocp* pthis = (iocp*)data;
+	iocp::error(pthis, "线程参数空指针");
 
 	//设置标识
 	pthis->m_close = false;
 
-	//投递几个I/O
-	for (int i = 0; i < pthis->m_accept_num; i++)
+	//投递3个I/O
+	for (int i = 0; i < 3; i++)
 	{
 		piocp_io point = pthis->alloc_io(500);
 		if (point)
 		{
-			pthis->push_accept_list(point);
-			pthis->post_accept(point);
+			if (pthis->post_accept(point))
+				pthis->push_accept_list(point);
+			else
+				pthis->release_io(point);
 		}
 	}
 
+	iocp::error(pthis->m_work_number > 0, "listen_thread 工作线程数量少于1");
 	//构造事件数组
 	int size = 2 + pthis->m_work_number;
 	HANDLE* wait_event = new HANDLE[size];
-	assert(wait_event && "wait_event listen_thread");
+	iocp::error(wait_event, "listen_thread 构造时间数组失败");
+
 	memset(wait_event, 0, size * sizeof(HANDLE));
+
+	//前两个设置我们的事件句柄
 	wait_event[0] = pthis->m_accept_event;
 	wait_event[1] = pthis->m_repost_event;
 
 	//创建工作线程
 	for (int i = 0; i < pthis->m_work_number; i++)
 	{
-		wait_event[2 + i] = (HANDLE)_beginthread(work_thread, 0, pthis);
-		assert(wait_event[2 + i] && "_beginthread listen_thread");
+		wait_event[2 + i] = CreateThread(NULL, 0, work_thread, pthis, 0, nullptr);
+		iocp::error(wait_event[2 + i], "listen_thread 工作线程创建失败");
 	}
 
 	//循环处理
 	while (true)
 	{
-		//等待事件的响应
+		//等待事件组的响应
 		int index = WSAWaitForMultipleEvents(size, wait_event, FALSE, 60 * 1000, FALSE);
 
 		//要关闭服务
 		if (pthis->m_close || index == WSA_WAIT_FAILED)
 		{
-			//关闭全部客户连接
-			pthis->close_all_connected();
-			Sleep(1000);
-
-			//关闭监听套接字
-			closesocket(pthis->m_sock);
-			pthis->m_sock = INVALID_SOCKET;
-			Sleep(1000);
-
-			//通知全部工作线程退出
-			for (int i = 0; i < pthis->m_work_number; i++)
-				PostQueuedCompletionStatus(pthis->m_completion, -1, 0, NULL);
-
-			//等待全部工作线程退出
-			WaitForMultipleObjects(pthis->m_work_number, &wait_event[2], TRUE, 10 * 1000);
-
-			//关闭全部工作线程句柄
-			for (int i = 0; i < pthis->m_work_number; i++)
-			{
-				CloseHandle(wait_event[2 + i]);
-				wait_event[2 + i] = NULL;
-			}
-
-			//关闭完成端口句柄
-			CloseHandle(pthis->m_completion);
-			pthis->m_completion = NULL;
-
-			//释放全部空间
-			pthis->release_all_io();
-			pthis->release_all_client();
-			return;
+			pthis->m_start = false;
+			break;
 		}
 
 		//等待超时
@@ -116,13 +94,13 @@ void __cdecl iocp::listen_thread(void* data)
 		}
 
 		//report事件触发,说明有新的客户尝试连接
-		if (index == 1)
+		else if (index == 1)
 		{
 			limit = InterlockedExchange64(&pthis->m_report_number, 0);
 		}
 
 		//工作事件触发,说明错误的发生
-		if (index > 1)
+		else if (index > 1)
 		{
 			pthis->m_close = true;
 			continue;
@@ -134,19 +112,51 @@ void __cdecl iocp::listen_thread(void* data)
 			piocp_io point = pthis->alloc_io(500);
 			if (point)
 			{
-				pthis->push_accept_list(point);
-				pthis->post_accept(point);
+				if (pthis->post_accept(point))
+					pthis->push_accept_list(point);
+				else
+					pthis->release_io(point);
 			}
 		}
 	}
 
+	//关闭全部客户连接
+	pthis->close_all_connected();
+	Sleep(1000);
+
+	//通知全部工作线程退出
+	for (int i = 0; i < pthis->m_work_number; i++)
+		PostQueuedCompletionStatus(pthis->m_completion, -1, 0, NULL);
+
+	//等待全部工作线程退出
+	WaitForMultipleObjects(pthis->m_work_number, &wait_event[2], TRUE, 10 * 1000);
+
+	//关闭全部工作线程句柄
+	for (int i = 0; i < pthis->m_work_number; i++)
+		CloseHandle(wait_event[2 + i]);
+
+	//关闭监听套接字
+	closesocket(pthis->m_sock);
+	pthis->m_sock = INVALID_SOCKET;
+
+	//关闭完成端口句柄
+	CloseHandle(pthis->m_completion);
+	pthis->m_completion = NULL;
+
+	//释放全部空间
+	pthis->release_all_io();
+	pthis->release_all_client();
+
+	//结束线程
+	_endthread();
 	return;
 }
 
-void __cdecl iocp::work_thread(void* data)
+DWORD WINAPI iocp::work_thread(LPVOID data)
 {
 	//强行转化
 	iocp* pthis = (iocp*)data;
+	iocp::error(pthis, "work_thread 线程参数为空");
 
 	//循环处理
 	while (true)
@@ -160,7 +170,7 @@ void __cdecl iocp::work_thread(void* data)
 			(LPDWORD)&key, (LPOVERLAPPED*)&overlap, WSA_INFINITE);
 
 		//退出消息
-		if (numbers == -1) return;
+		if (numbers == -1) break;
 
 		//获取io结构
 		piocp_io point = CONTAINING_RECORD(overlap, iocp_io, overlap);
@@ -184,6 +194,8 @@ void __cdecl iocp::work_thread(void* data)
 		//处理事件
 		pthis->handle_io(key, point, numbers, error);
 	}
+
+	return 0;
 }
 
 iocp::iocp()
@@ -198,16 +210,20 @@ iocp::~iocp()
 
 piocp_io iocp::alloc_io(int size)
 {
-	if (size <= 0) return nullptr;
+	iocp::error(size > 0, "alloc_io size小于0");
 
 	piocp_io result = nullptr;
 	EnterCriticalSection(&m_criti_io);
 	//缓存池为空,申请新的空间
 	if (m_free_io_list.empty())
 	{
-		result = new iocp_io; assert(result && "result  alloc_io");
+		result = new iocp_io;
+		iocp::error(result, "alloc_io new iocp_io失败");
+
 		result->release();
-		result->buffer = new char[size]; assert(result->buffer && "result->buffer alloc_io");
+		result->buffer = new char[size];
+		iocp::error(result->buffer, "alloc_io new result->buffer失败");
+
 		memset(result->buffer, 0, size);
 		result->buffer_size = size;
 	}
@@ -226,23 +242,38 @@ void iocp::release_io(piocp_io point)
 	if (point == nullptr) return;
 
 	EnterCriticalSection(&m_criti_io);
-	//缓存池数量达到最大,释放后面进来的
-	if (m_free_io_list.size() > m_max_io_pool)
-	{
-		//先释放buffer后再释放自身
-		if (point->buffer != nullptr) delete[] point->buffer;
-		point->buffer = nullptr;
-		delete point;
-		point = nullptr;
-	}
-	else
-	{
-		//清空无用数据
-		point->release();
 
-		//加入列表
-		m_free_io_list.push_back(point);
+	//先查找列表里面是不是有该IO指针了,防止列表出现重复的
+	bool state = false;
+	for (const auto& it : m_free_io_list)
+		if (it == point)
+		{
+			state = true;
+			break;
+		}
+
+	//没有重复的
+	if (state == false)
+	{
+		//缓存池数量达到最大,释放后面进来的
+		if (m_free_io_list.size() > m_max_io_pool)
+		{
+			//先释放buffer后再释放自身
+			if (point->buffer != nullptr) delete[] point->buffer;
+			point->buffer = nullptr;
+			delete point;
+			point = nullptr;
+		}
+		else
+		{
+			//清空无用数据
+			point->release();
+
+			//加入列表
+			m_free_io_list.push_back(point);
+		}
 	}
+
 	LeaveCriticalSection(&m_criti_io);
 }
 
@@ -274,7 +305,9 @@ piocp_client iocp::alloc_client(SOCKET sock)
 	if (m_free_client_list.empty())
 	{
 		//申请空间后初始化关键段
-		result = new iocp_client; assert(result && "result alloc_client");
+		result = new iocp_client;
+		iocp::error(result, "alloc_client new失败");
+
 		result->release();
 		InitializeCriticalSection(&result->criti_lock);
 	}
@@ -282,6 +315,10 @@ piocp_client iocp::alloc_client(SOCKET sock)
 	{
 		//直接用缓存池从拿出
 		result = m_free_client_list.back();
+
+		//清空旧相关数据
+		result->release();
+
 		m_free_client_list.pop_back();
 	}
 	LeaveCriticalSection(&m_criti_client);
@@ -300,21 +337,36 @@ void iocp::release_client(piocp_client point)
 	point->lost_io_list.clear();
 
 	EnterCriticalSection(&m_criti_client);
-	if (m_free_client_list.size() > m_max_client_pool)
-	{
-		//释放关键段后释放自身
-		DeleteCriticalSection(&point->criti_lock);
-		delete point;
-		point = nullptr;
-	}
-	else
-	{
-		//清空无用信息
-		point->release();
 
-		//加入列表
-		m_free_client_list.push_back(point);
+	//判断列表里面是否有重复的
+	bool state = false;
+	for (const auto& it : m_free_client_list)
+		if (it == point)
+		{
+			state = true;
+			break;
+		}
+
+	//没有重复的
+	if (state == false)
+	{
+		if (m_free_client_list.size() > m_max_client_pool)
+		{
+			//释放关键段后释放自身
+			DeleteCriticalSection(&point->criti_lock);
+			delete point;
+			point = nullptr;
+		}
+		else
+		{
+			//清空无用信息
+			point->release();
+
+			//加入列表
+			m_free_client_list.push_back(point);
+		}
 	}
+
 	LeaveCriticalSection(&m_criti_client);
 }
 
@@ -338,11 +390,12 @@ void iocp::release_all_client()
 
 void iocp::push_accept_list(piocp_io point)
 {
-	if (point == nullptr) return;
-
-	EnterCriticalSection(&m_criti_accept);
-	m_accept_io_list.push_back(point);
-	LeaveCriticalSection(&m_criti_accept);
+	if (point)
+	{
+		EnterCriticalSection(&m_criti_accept);
+		m_accept_io_list.push_back(point);
+		LeaveCriticalSection(&m_criti_accept);
+	}
 }
 
 void iocp::pop_accept_list(piocp_io point)
@@ -458,9 +511,7 @@ void iocp::handle_io(DWORD key, piocp_io point, DWORD number, int error)
 		}
 	}
 	else//从Accept队列拿出,应该进入Connect队列了
-	{
 		pop_accept_list(point);
-	}
 
 	//如果有错误,直接关闭套接字
 	if (error != NO_ERROR)
@@ -523,7 +574,8 @@ void iocp::handle_io(DWORD key, piocp_io point, DWORD number, int error)
 				memcpy(&new_client->remote_addr, remote_addr, remote_len);
 
 				//关联到完成端口
-				assert(CreateIoCompletionPort((HANDLE)new_client->sock, m_completion, (DWORD)new_client, 0) && "new_client");
+				HANDLE res = CreateIoCompletionPort((HANDLE)new_client->sock, m_completion, (DWORD)new_client, 0);
+				iocp::error(res, "handle_io CreateIoCompletionPort失败");
 
 				//通知用户
 				on_connect_finish_evnet(new_client, point);
@@ -535,11 +587,8 @@ void iocp::handle_io(DWORD key, piocp_io point, DWORD number, int error)
 					if (temp)
 					{
 						bool state = post_recv(new_client, temp);
-						if (state == false)
-						{
-							close_connected(new_client);
-							break;
-						}
+						if (state == false) close_connected(new_client);
+						else std::cout << "[+] 向 " << temp->sock << " 投递Recv请求" << std::endl;
 					}
 				}
 			}
@@ -550,6 +599,8 @@ void iocp::handle_io(DWORD key, piocp_io point, DWORD number, int error)
 
 		//通知监听线程再次投递一个Accept请求
 		InterlockedIncrement64(&m_report_number);
+
+		//触发事件
 		SetEvent(m_repost_event);
 	}
 
@@ -594,6 +645,7 @@ void iocp::handle_io(DWORD key, piocp_io point, DWORD number, int error)
 			{
 				bool state = post_recv(client, value);
 				if (state == false) close_connected(client);
+				else std::cout << "向 " << value->sock << " 投递Recv请求" << std::endl;
 			}
 		}
 	}
@@ -629,17 +681,16 @@ void iocp::handle_io(DWORD key, piocp_io point, DWORD number, int error)
 
 bool iocp::initialize()
 {
-	m_initialize = false;
-	m_start = false;
-	m_close = true;
+	m_initialize = false;	// 没有初始化
+	m_start = false;		// 没有开始
+	m_close = true;		// 已经关闭
 
-	m_port = 7744;
-	m_sock = INVALID_SOCKET;
+	m_port = 7744;		// 端口
+	m_sock = INVALID_SOCKET;	// 无效套接字
 
-	m_accept_num = 5;
-	m_max_accept_num = 30;
+	m_max_accept_num = 30;	// 最多AcceptI/O请求
 
-	m_max_connections = 2000;
+	m_max_connections = 20000;		// 最多连接数
 	m_max_io_pool = 200;
 	m_max_client_pool = 200;
 
@@ -648,8 +699,14 @@ bool iocp::initialize()
 	m_acceptex = nullptr;
 	m_getacceptexsockaddrs = nullptr;
 
-	m_accept_event = CreateEventA(NULL, FALSE, FALSE, NULL); assert(m_accept_event && "m_accept_event");
-	m_repost_event = CreateEventA(NULL, FALSE, FALSE, NULL); assert(m_repost_event && "m_repost_event");
+	m_accept_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+	if (m_accept_event == NULL)
+		return false;
+
+	m_repost_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+	if (m_repost_event == NULL)
+		return false;
+
 	m_report_number = 0;
 
 	m_listen_thread = NULL;
@@ -671,6 +728,7 @@ bool iocp::initialize()
 bool iocp::release()
 {
 	//关闭标识
+	if (m_initialize == false) return false;
 	m_initialize = false;
 	m_start = false;
 	m_close = true;
@@ -679,12 +737,18 @@ bool iocp::release()
 	SetEvent(m_accept_event);
 	WaitForSingleObject(m_listen_thread, INFINITE);
 
+	//因为监听线程是使用_beginthread创建起来的,所以不能用CloseHandle()来关闭句柄
+	m_listen_thread = NULL;
+
 	WSACleanup();
 
-	if (m_accept_event) CloseHandle(m_accept_event); m_accept_event = NULL;
-	if (m_repost_event) CloseHandle(m_repost_event); m_repost_event = NULL;
+	if (m_accept_event)
+		CloseHandle(m_accept_event);
+	if (m_repost_event)
+		CloseHandle(m_repost_event);
 
-	if (m_listen_thread) CloseHandle(m_listen_thread); m_listen_thread = NULL;
+	m_accept_event = NULL;
+	m_repost_event = NULL;
 
 	DeleteCriticalSection(&m_criti_io);
 	DeleteCriticalSection(&m_criti_client);
@@ -739,7 +803,7 @@ bool iocp::start()
 		if (result == SOCKET_ERROR) __leave;
 
 		//将套接字与IO完成端口进行绑定
-		CreateIoCompletionPort((HANDLE)m_sock, m_completion, 0, 0);
+		if (CreateIoCompletionPort((HANDLE)m_sock, m_completion, 0, 0) == NULL) __leave;
 
 		//注册Accept事件以投递Accept
 		result = WSAEventSelect(m_sock, m_accept_event, FD_ACCEPT);
@@ -749,8 +813,10 @@ bool iocp::start()
 		m_listen_thread = (HANDLE)_beginthread(listen_thread, 0, this);
 		if (m_listen_thread == NULL) __leave;
 
-		//设置标识
+		//设置开始标识
 		m_start = true;
+
+		//设置返回状态
 		back_state = true;
 	}
 	__finally
@@ -797,6 +863,7 @@ void iocp::close_all_connected()
 
 		LeaveCriticalSection(&it->criti_lock);
 	}
+
 	//清空
 	m_connect_client_list.clear();
 
